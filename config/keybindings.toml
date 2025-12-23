@@ -50,3 +50,23 @@ modifiers = ["super"]
 action = "cycle-opacity"
 key = "O"
 modifiers = ["super"]
+
+[[keybindings]]
+action = "workspace-prev"
+key = "Left"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "workspace-next"
+key = "Right"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "move-to-workspace-prev"
+key = "Left"
+modifiers = ["super", "shift"]
+
+[[keybindings]]
+action = "move-to-workspace-next"
+key = "Right"
+modifiers = ["super", "shift"]

@@ -18,6 +18,10 @@ pub enum Action {
     ToggleMinimize,
     CloseFocused,
     CycleOpacity,
+    WorkspaceNext,
+    WorkspacePrev,
+    MoveToWorkspaceNext,
+    MoveToWorkspacePrev,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -30,11 +34,19 @@ pub struct ModifiersMask {
 
 impl ModifiersMask {
     pub fn matches(&self, mods: &ModifiersState, super_is_alt: bool) -> bool {
-        let super_pressed = if super_is_alt { mods.alt } else { mods.logo };
-        (!self.ctrl || mods.ctrl)
-            && (!self.alt || mods.alt)
-            && (!self.shift || mods.shift)
-            && (!self.super_key || super_pressed)
+        let actual_ctrl = mods.ctrl;
+        let actual_shift = mods.shift;
+        let actual_super = if super_is_alt { mods.alt } else { mods.logo };
+        let actual_alt = if super_is_alt { false } else { mods.alt };
+
+        if super_is_alt && mods.logo {
+            return false;
+        }
+
+        self.ctrl == actual_ctrl
+            && self.shift == actual_shift
+            && self.super_key == actual_super
+            && self.alt == actual_alt
     }
 }
 

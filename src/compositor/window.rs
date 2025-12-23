@@ -31,10 +31,11 @@ pub struct Window {
     opacity: f32,
     restore_geometry: Option<(Point<i32, Logical>, Size<i32, Logical>)>,
     restore_floating: bool,
+    workspace: usize,
 }
 
 impl Window {
-    pub fn new(id: WindowId, toplevel: ToplevelSurface) -> Self {
+    pub fn new(id: WindowId, toplevel: ToplevelSurface, workspace: usize) -> Self {
         Self {
             id,
             toplevel,
@@ -50,6 +51,7 @@ impl Window {
             opacity: 1.0,
             restore_geometry: None,
             restore_floating: false,
+            workspace,
         }
     }
 
@@ -87,6 +89,19 @@ impl Window {
 
     pub fn opacity(&self) -> f32 {
         self.opacity
+    }
+
+    pub fn workspace(&self) -> usize {
+        self.workspace
+    }
+
+    pub fn set_workspace(&mut self, workspace: usize) -> bool {
+        if self.workspace != workspace {
+            self.workspace = workspace;
+            self.decoration_commit.increment();
+            return true;
+        }
+        false
     }
 
     pub fn set_dragging(&mut self, dragging: bool) {
@@ -239,6 +254,8 @@ pub struct WindowManager {
     windows: Vec<Window>,
     focused: Option<WindowId>,
     next_id: u64,
+    current_workspace: usize,
+    workspace_count: usize,
 }
 
 impl WindowManager {
@@ -247,6 +264,8 @@ impl WindowManager {
             windows: Vec::new(),
             focused: None,
             next_id: 1,
+            current_workspace: 0,
+            workspace_count: 4,
         }
     }
 
@@ -259,15 +278,20 @@ impl WindowManager {
     }
 
     pub fn add_window(&mut self, toplevel: ToplevelSurface) -> WindowId {
+        let workspace = self.current_workspace;
         let id = WindowId(self.next_id);
         self.next_id += 1;
-        self.windows.push(Window::new(id, toplevel));
+        self.windows.push(Window::new(id, toplevel, workspace));
         self.focus_window(id);
         id
     }
 
     pub fn focus_window(&mut self, id: WindowId) -> bool {
-        if !self.windows.iter().any(|window| window.id == id && !window.is_minimized()) {
+        if !self
+            .windows
+            .iter()
+            .any(|window| window.id == id && !window.is_minimized() && window.workspace == self.current_workspace)
+        {
             return false;
         }
 
@@ -283,7 +307,7 @@ impl WindowManager {
         let ids: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|window| !window.is_minimized())
+            .filter(|window| !window.is_minimized() && window.workspace == self.current_workspace)
             .map(|window| window.id)
             .collect();
         if ids.is_empty() {
@@ -307,7 +331,7 @@ impl WindowManager {
         let ids: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|window| !window.is_minimized())
+            .filter(|window| !window.is_minimized() && window.workspace == self.current_workspace)
             .map(|window| window.id)
             .collect();
         if ids.is_empty() {
@@ -329,12 +353,18 @@ impl WindowManager {
 
     pub fn focused_window(&self) -> Option<&Window> {
         self.focused
-            .and_then(|id| self.windows.iter().find(|window| window.id == id))
+            .and_then(|id| {
+                self.windows
+                    .iter()
+                    .find(|window| window.id == id && window.workspace == self.current_workspace)
+            })
     }
 
     pub fn focused_window_mut(&mut self) -> Option<&mut Window> {
         let focused = self.focused?;
-        self.windows.iter_mut().find(|window| window.id == focused)
+        self.windows
+            .iter_mut()
+            .find(|window| window.id == focused && window.workspace == self.current_workspace)
     }
 
     pub fn window_at(&self, point: Point<f64, Logical>) -> Option<WindowId> {
@@ -342,7 +372,11 @@ impl WindowManager {
         self.windows
             .iter()
             .rev()
-            .find(|window| !window.is_minimized() && window.outer_rect().contains(point))
+            .find(|window| {
+                !window.is_minimized()
+                    && window.workspace == self.current_workspace
+                    && window.outer_rect().contains(point)
+            })
             .map(|window| window.id)
     }
 
@@ -390,6 +424,49 @@ impl WindowManager {
     pub fn set_maximized(&mut self, id: WindowId, maximized: bool, output_size: Size<i32, Logical>) -> bool {
         self.window_mut(id)
             .map(|window| window.set_maximized(maximized, output_size))
+            .unwrap_or(false)
+    }
+
+    pub fn current_workspace(&self) -> usize {
+        self.current_workspace
+    }
+
+    pub fn workspace_count(&self) -> usize {
+        self.workspace_count
+    }
+
+    pub fn set_current_workspace(&mut self, workspace: usize) -> bool {
+        if workspace >= self.workspace_count {
+            return false;
+        }
+        if self.current_workspace != workspace {
+            self.current_workspace = workspace;
+            self.focused = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn next_workspace(&mut self) -> bool {
+        let next = (self.current_workspace + 1) % self.workspace_count;
+        self.set_current_workspace(next)
+    }
+
+    pub fn prev_workspace(&mut self) -> bool {
+        let prev = if self.current_workspace == 0 {
+            self.workspace_count - 1
+        } else {
+            self.current_workspace - 1
+        };
+        self.set_current_workspace(prev)
+    }
+
+    pub fn move_window_to_workspace(&mut self, id: WindowId, workspace: usize) -> bool {
+        if workspace >= self.workspace_count {
+            return false;
+        }
+        self.window_mut(id)
+            .map(|window| window.set_workspace(workspace))
             .unwrap_or(false)
     }
 }

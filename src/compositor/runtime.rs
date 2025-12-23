@@ -195,6 +195,9 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
             let scale = Scale::from(1.0);
 
             for window in state.windows.windows() {
+                if window.workspace() != state.windows.current_workspace() {
+                    continue;
+                }
                 if window.is_minimized() {
                     continue;
                 }
@@ -224,6 +227,9 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
             let _ = frame.finish()?;
 
             for window in state.windows.windows() {
+                if window.workspace() != state.windows.current_workspace() {
+                    continue;
+                }
                 if window.is_minimized() {
                     continue;
                 }
@@ -298,7 +304,8 @@ struct App {
 
 impl App {
     fn apply_layout(&mut self) {
-        self.layout.apply(self.output_size, self.windows.windows_mut());
+        let workspace = self.windows.current_workspace();
+        self.layout.apply(self.output_size, self.windows.windows_mut(), workspace);
         self.layout_dirty = false;
     }
 
@@ -365,6 +372,47 @@ impl App {
             Action::CycleOpacity => {
                 if let Some(window) = self.windows.focused_window_mut() {
                     window.cycle_opacity();
+                }
+            }
+            Action::WorkspaceNext => {
+                if self.windows.next_workspace() {
+                    self.reset_pointer_grabs();
+                    self.refocus_current_workspace();
+                    self.layout_dirty = true;
+                    tracing::info!("Workspace switched to {}", self.windows.current_workspace() + 1);
+                }
+            }
+            Action::WorkspacePrev => {
+                if self.windows.prev_workspace() {
+                    self.reset_pointer_grabs();
+                    self.refocus_current_workspace();
+                    self.layout_dirty = true;
+                    tracing::info!("Workspace switched to {}", self.windows.current_workspace() + 1);
+                }
+            }
+            Action::MoveToWorkspaceNext => {
+                if let Some(window_id) = self.active_window_id() {
+                    let next = (self.windows.current_workspace() + 1) % self.windows.workspace_count();
+                    if self.windows.move_window_to_workspace(window_id, next) {
+                        self.refocus_current_workspace();
+                        self.layout_dirty = true;
+                        tracing::info!("Moved window to workspace {}", next + 1);
+                    }
+                }
+            }
+            Action::MoveToWorkspacePrev => {
+                if let Some(window_id) = self.active_window_id() {
+                    let current = self.windows.current_workspace();
+                    let prev = if current == 0 {
+                        self.windows.workspace_count() - 1
+                    } else {
+                        current - 1
+                    };
+                    if self.windows.move_window_to_workspace(window_id, prev) {
+                        self.refocus_current_workspace();
+                        self.layout_dirty = true;
+                        tracing::info!("Moved window to workspace {}", prev + 1);
+                    }
                 }
             }
         }
@@ -492,6 +540,32 @@ impl App {
             window.toplevel().send_configure();
         }
         true
+    }
+
+    fn refocus_current_workspace(&mut self) {
+        if let Some(id) = self.windows.focus_next() {
+            self.set_focus(id);
+        }
+    }
+
+    fn reset_pointer_grabs(&mut self) {
+        if let Some(drag) = self.input.drag_state() {
+            if let Some(window) = self.windows.window_mut(drag.window_id) {
+                window.set_dragging(false);
+            }
+            self.input.end_drag();
+        }
+        if self.input.resize_state().is_some() {
+            self.input.end_resize();
+        }
+    }
+
+    fn active_window_id(&self) -> Option<WindowId> {
+        if let Some(window) = self.windows.focused_window() {
+            return Some(window.id());
+        }
+        let (x, y) = self.input.pointer_location();
+        self.windows.window_at((x, y).into())
     }
 }
 

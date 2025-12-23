@@ -70,6 +70,26 @@ impl Default for ConfigFile {
                     key: "O".to_string(),
                     modifiers: vec!["super".to_string()],
                 },
+                KeybindingConfig {
+                    action: Action::WorkspacePrev,
+                    key: "Left".to_string(),
+                    modifiers: vec!["super".to_string()],
+                },
+                KeybindingConfig {
+                    action: Action::WorkspaceNext,
+                    key: "Right".to_string(),
+                    modifiers: vec!["super".to_string()],
+                },
+                KeybindingConfig {
+                    action: Action::MoveToWorkspacePrev,
+                    key: "Left".to_string(),
+                    modifiers: vec!["super".to_string(), "shift".to_string()],
+                },
+                KeybindingConfig {
+                    action: Action::MoveToWorkspaceNext,
+                    key: "Right".to_string(),
+                    modifiers: vec!["super".to_string(), "shift".to_string()],
+                },
             ],
             floating_app_ids: Vec::new(),
             super_modifier: default_super_modifier(),

@@ -49,11 +49,16 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
-    pub fn apply(&self, output: Size<i32, Logical>, windows: &mut [Window]) {
+    pub fn apply(&self, output: Size<i32, Logical>, windows: &mut [Window], workspace: usize) {
         let active: Vec<usize> = windows
             .iter()
             .enumerate()
-            .filter(|(_, window)| !window.is_dragging() && !window.is_floating() && !window.is_minimized())
+            .filter(|(_, window)| {
+                !window.is_dragging()
+                    && !window.is_floating()
+                    && !window.is_minimized()
+                    && window.workspace() == workspace
+            })
             .map(|(idx, _)| idx)
             .collect();
 
