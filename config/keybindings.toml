@@ -1,0 +1,52 @@
+floating_app_ids = []
+super_modifier = "alt"
+
+[[keybindings]]
+action = "quit"
+key = "Q"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "next-layout"
+key = "space"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "prev-layout"
+key = "space"
+modifiers = ["super", "shift"]
+
+[[keybindings]]
+action = "focus-next"
+key = "J"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "focus-prev"
+key = "K"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "toggle-float"
+key = "F"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "toggle-maximize"
+key = "M"
+modifiers = ["super", "shift"]
+
+[[keybindings]]
+action = "toggle-minimize"
+key = "M"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "close-focused"
+key = "W"
+modifiers = ["super"]
+
+[[keybindings]]
+action = "cycle-opacity"
+key = "O"
+modifiers = ["super"]

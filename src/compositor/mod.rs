@@ -1,21 +1,11 @@
-pub mod input;
-pub mod render;
-pub mod state;
-pub mod wayland;
+mod config;
+mod input;
+mod layout;
+mod runtime;
+mod window;
 
-pub struct Compositor {
-    state: state::State,
-}
-
-impl Compositor {
-    pub fn new() -> Self {
-        Self {
-            state: state::State::new(),
-        }
-    }
-
-    pub fn run(&mut self) {
-        self.state.initialize();
-        self.state.run();
+pub fn run() {
+    if let Err(error) = runtime::run() {
+        eprintln!("Compositor failed: {error}");
     }
 }
