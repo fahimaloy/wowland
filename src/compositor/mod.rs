@@ -1,11 +1,11 @@
-mod config;
+pub mod config;
 mod input;
+mod launcher;
 mod layout;
+mod panel;
 mod runtime;
 mod window;
 
-pub fn run() {
-    if let Err(error) = runtime::run() {
-        eprintln!("Compositor failed: {error}");
-    }
+pub fn run(config_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    runtime::run(config_path)
 }

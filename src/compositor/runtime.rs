@@ -1,13 +1,16 @@
 use std::{os::unix::io::OwnedFd, sync::Arc};
 
-use ::winit::platform::pump_events::PumpStatus;
+use smithay::backend::winit as WinitBackend;
+use smithay::backend::winit::WinitEvent;
+use smithay::input::keyboard::KeyboardHandle;
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, ButtonState, Event, InputEvent, KeyboardKeyEvent, KeyState, MouseButton,
-            PointerButtonEvent,
+            AbsolutePositionEvent, ButtonState, Event, InputEvent, KeyState, KeyboardKeyEvent,
+            MouseButton, PointerButtonEvent,
         },
         renderer::{
+            damage::OutputDamageTracker,
             element::{
                 render_elements,
                 solid::SolidColorRenderElement,
@@ -15,23 +18,24 @@ use smithay::{
                 Kind,
             },
             gles::GlesRenderer,
-            utils::{draw_render_elements, on_commit_buffer_handler},
-            Color32F, Frame, ImportAll, Renderer,
+            utils::on_commit_buffer_handler,
+            Color32F, ImportAll, Renderer,
         },
-        winit::{self, WinitEvent},
     },
     delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{keyboard::FilterResult, Seat, SeatHandler, SeatState},
     reexports::wayland_server::{protocol::wl_seat, Display},
-    utils::{Logical, Rectangle, Scale, Serial, Size, Transform},
+    utils::{Logical, Physical, Rectangle, Scale, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, TraversalAction,
+            with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
+            CompositorState, SurfaceAttributes, TraversalAction,
         },
         selection::{
-            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
             SelectionHandler,
         },
         shell::xdg::{
@@ -42,7 +46,6 @@ use smithay::{
     },
 };
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::input::keyboard::KeyboardHandle;
 use wayland_server::{
     backend::{ClientData, ClientId, DisconnectReason},
     protocol::{
@@ -51,12 +54,16 @@ use wayland_server::{
     },
     Client, ListeningSocket,
 };
+#[allow(unused_imports)]
+use winit::platform::pump_events::PumpStatus;
 
 use crate::compositor::{
     config, input,
     input::Action,
+    launcher::AppLauncher,
     layout::LayoutEngine,
-    window::{WindowId, WindowManager, DECORATION_HEIGHT},
+    panel::Panel,
+    window::{WindowId, WindowManager, DECORATION_HEIGHT, PANEL_HEIGHT},
 };
 
 render_elements! {
@@ -69,9 +76,9 @@ const BACKGROUND: Color32F = Color32F::new(0.12, 0.14, 0.18, 1.0);
 const MIN_FLOAT_WIDTH: i32 = 160;
 const MIN_FLOAT_HEIGHT: i32 = 120;
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(config_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
-    run_winit()
+    run_winit(config_path)
 }
 
 fn init_logging() {
@@ -82,7 +89,7 @@ fn init_logging() {
     }
 }
 
-pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_winit(config_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<App> = Display::new()?;
     let dh = display.handle();
 
@@ -91,7 +98,7 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "wowland");
 
-    let config = config::load_config("config/keybindings.toml");
+    let config = config::load_config_with_fallback(config_path);
     let bindings = input::resolve_keybindings(&config.keybindings);
     let super_is_alt = config::super_is_alt(&config);
 
@@ -108,13 +115,40 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
         input: input::InputState::new(bindings, super_is_alt),
         floating_app_ids: config.floating_app_ids.clone(),
         super_is_alt,
+        damage_tracker: OutputDamageTracker::new(Size::from((1, 1)), 1.0, Transform::Flipped180),
         output_size: Size::from((1, 1)),
         layout_dirty: true,
+        needs_redraw: true,
         should_exit: false,
+        panel: Panel::new(4),
+        launcher: AppLauncher::new(),
     };
 
+    state.launcher.load_desktop_files();
+
+    if let Some(focused) = &config.decoration_focused {
+        if let Some(color) = config::parse_hex_color(focused) {
+            if let Some(unfocused) = &config.decoration_unfocused {
+                if let Some(unfocused_color) = config::parse_hex_color(unfocused) {
+                    state.windows.set_decoration_colors(color, unfocused_color);
+                }
+            }
+        }
+    }
+
+    if let Some(gaps_config) = &config.gaps {
+        state.layout.gaps.inner = gaps_config.inner.unwrap_or(0);
+        state.layout.gaps.outer = gaps_config.outer.unwrap_or(0);
+    }
+
+    if let Some(workspace_config) = &config.workspace {
+        state.windows.set_workspace_count(workspace_config.count);
+    }
+
+    state.panel = Panel::new(state.windows.workspace_count());
+
     let listener = ListeningSocket::bind_auto("wowland", 1..=32)?;
-    let (mut backend, mut winit) = winit::init::<GlesRenderer>()?;
+    let (mut backend, mut winit) = WinitBackend::init::<GlesRenderer>()?;
     let start_time = std::time::Instant::now();
     let keyboard = state.seat.add_keyboard(Default::default(), 200, 200)?;
     state.keyboard = Some(keyboard.clone());
@@ -178,21 +212,48 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let size = backend.window_size();
+        let scale_factor = backend.scale_factor();
         let logical_size = size.to_logical(1);
         if logical_size != state.output_size {
             state.output_size = logical_size;
             state.layout_dirty = true;
+            state.needs_redraw = true;
+            state.damage_tracker =
+                OutputDamageTracker::new(size, scale_factor, Transform::Flipped180);
         }
 
         if state.layout_dirty {
             state.apply_layout();
         }
 
-        let damage = Rectangle::from_size(size);
+        if let Some(stream) = listener.accept()? {
+            let client = display
+                .handle()
+                .insert_client(stream, Arc::new(ClientState::default()))?;
+            tracing::info!("Client connected: {:?}", client.id());
+        }
+
+        display.dispatch_clients(&mut state)?;
+        display.flush_clients()?;
+
+        if !state.needs_redraw {
+            continue;
+        }
+
+        let buffer_age = backend.buffer_age().unwrap_or(0);
+        let frame_damage: Option<Vec<Rectangle<i32, Physical>>>;
         {
             let (renderer, mut framebuffer) = backend.bind()?;
             let mut elements = Vec::new();
             let scale = Scale::from(1.0);
+
+            state.panel.update(
+                state.windows.current_workspace(),
+                state.windows.workspace_count(),
+            );
+            for panel_elem in state.panel.render_elements(scale, state.output_size) {
+                elements.push(AppRenderElement::Solid(panel_elem));
+            }
 
             for window in state.windows.windows() {
                 if window.workspace() != state.windows.current_workspace() {
@@ -206,8 +267,13 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
                     .focused_window()
                     .map(|focused| focused.id() == window.id())
                     .unwrap_or(false);
-                elements.push(AppRenderElement::Solid(window.decoration_element(scale, focused)));
-                let window_origin = (window.location().x, window.location().y + DECORATION_HEIGHT);
+                elements.push(AppRenderElement::Solid(
+                    window.decoration_element(scale, focused),
+                ));
+                let window_origin = (
+                    window.location().x,
+                    window.location().y + DECORATION_HEIGHT + PANEL_HEIGHT,
+                );
                 let surface_elements = render_elements_from_surface_tree(
                     renderer,
                     window.wl_surface(),
@@ -221,31 +287,28 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
                 elements.extend(surface_elements);
             }
 
-            let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
-            frame.clear(BACKGROUND, &[damage])?;
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
-            let _ = frame.finish()?;
-
-            for window in state.windows.windows() {
-                if window.workspace() != state.windows.current_workspace() {
-                    continue;
-                }
-                if window.is_minimized() {
-                    continue;
-                }
-                send_frames_surface_tree(window.wl_surface(), start_time.elapsed().as_millis() as u32);
-            }
-
-            if let Some(stream) = listener.accept()? {
-                let client = display.handle().insert_client(stream, Arc::new(ClientState::default()))?;
-                tracing::info!("Client connected: {:?}", client.id());
-            }
-
-            display.dispatch_clients(&mut state)?;
-            display.flush_clients()?;
+            let render_result = state.damage_tracker.render_output(
+                renderer,
+                &mut framebuffer,
+                buffer_age,
+                &elements,
+                BACKGROUND,
+            )?;
+            frame_damage = render_result.damage.map(|damage| damage.to_vec());
         }
 
-        backend.submit(Some(&[damage]))?;
+        for window in state.windows.windows() {
+            if window.workspace() != state.windows.current_workspace() {
+                continue;
+            }
+            if window.is_minimized() {
+                continue;
+            }
+            send_frames_surface_tree(window.wl_surface(), start_time.elapsed().as_millis() as u32);
+        }
+
+        backend.submit(frame_damage.as_deref())?;
+        state.needs_redraw = false;
     }
 }
 
@@ -297,16 +360,22 @@ struct App {
     input: input::InputState,
     floating_app_ids: Vec<String>,
     super_is_alt: bool,
+    damage_tracker: OutputDamageTracker,
     output_size: Size<i32, Logical>,
     layout_dirty: bool,
+    needs_redraw: bool,
     should_exit: bool,
+    panel: Panel,
+    launcher: AppLauncher,
 }
 
 impl App {
     fn apply_layout(&mut self) {
         let workspace = self.windows.current_workspace();
-        self.layout.apply(self.output_size, self.windows.windows_mut(), workspace);
+        self.layout
+            .apply(self.output_size, self.windows.windows_mut(), workspace);
         self.layout_dirty = false;
+        self.needs_redraw = true;
     }
 
     fn apply_action(&mut self, action: Action) {
@@ -336,6 +405,7 @@ impl App {
                     let new_state = !window.is_floating();
                     if self.windows.set_floating(id, new_state) {
                         self.layout_dirty = true;
+                        self.needs_redraw = true;
                     }
                 }
             }
@@ -345,6 +415,7 @@ impl App {
                     let new_state = !window.is_maximized();
                     if self.set_maximized(id, new_state) {
                         self.layout_dirty = true;
+                        self.needs_redraw = true;
                     }
                 }
             }
@@ -361,17 +432,20 @@ impl App {
                             self.set_focus(id);
                         }
                         self.layout_dirty = true;
+                        self.needs_redraw = true;
                     }
                 }
             }
             Action::CloseFocused => {
                 if let Some(window) = self.windows.focused_window() {
                     window.toplevel().send_close();
+                    self.needs_redraw = true;
                 }
             }
             Action::CycleOpacity => {
                 if let Some(window) = self.windows.focused_window_mut() {
                     window.cycle_opacity();
+                    self.needs_redraw = true;
                 }
             }
             Action::WorkspaceNext => {
@@ -379,7 +453,11 @@ impl App {
                     self.reset_pointer_grabs();
                     self.refocus_current_workspace();
                     self.layout_dirty = true;
-                    tracing::info!("Workspace switched to {}", self.windows.current_workspace() + 1);
+                    self.needs_redraw = true;
+                    tracing::info!(
+                        "Workspace switched to {}",
+                        self.windows.current_workspace() + 1
+                    );
                 }
             }
             Action::WorkspacePrev => {
@@ -387,15 +465,21 @@ impl App {
                     self.reset_pointer_grabs();
                     self.refocus_current_workspace();
                     self.layout_dirty = true;
-                    tracing::info!("Workspace switched to {}", self.windows.current_workspace() + 1);
+                    self.needs_redraw = true;
+                    tracing::info!(
+                        "Workspace switched to {}",
+                        self.windows.current_workspace() + 1
+                    );
                 }
             }
             Action::MoveToWorkspaceNext => {
                 if let Some(window_id) = self.active_window_id() {
-                    let next = (self.windows.current_workspace() + 1) % self.windows.workspace_count();
+                    let next =
+                        (self.windows.current_workspace() + 1) % self.windows.workspace_count();
                     if self.windows.move_window_to_workspace(window_id, next) {
                         self.refocus_current_workspace();
                         self.layout_dirty = true;
+                        self.needs_redraw = true;
                         tracing::info!("Moved window to workspace {}", next + 1);
                     }
                 }
@@ -411,7 +495,28 @@ impl App {
                     if self.windows.move_window_to_workspace(window_id, prev) {
                         self.refocus_current_workspace();
                         self.layout_dirty = true;
+                        self.needs_redraw = true;
                         tracing::info!("Moved window to workspace {}", prev + 1);
+                    }
+                }
+            }
+            Action::Spawn { command } => {
+                tracing::info!("Spawning: {}", command);
+                if let Err(e) = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .spawn()
+                {
+                    tracing::error!("Failed to spawn command: {}", e);
+                }
+            }
+            Action::Launcher { query } => {
+                let query = query.as_deref().unwrap_or("");
+                let matches = self.launcher.search(query);
+                if let Some(first) = matches.first() {
+                    tracing::info!("Launching: {}", first.name);
+                    if let Err(e) = self.launcher.spawn(&first.name) {
+                        tracing::error!("Failed to launch app: {}", e);
                     }
                 }
             }
@@ -419,11 +524,18 @@ impl App {
     }
 
     fn set_focus(&mut self, id: WindowId) {
+        let was_focused = self.windows.focused_window().map(|window| window.id());
         if !self.windows.focus_window(id) {
             return;
         }
-        if let (Some(window), Some(keyboard)) = (self.windows.focused_window(), self.keyboard.clone()) {
+        if let (Some(window), Some(keyboard)) =
+            (self.windows.focused_window(), self.keyboard.clone())
+        {
             keyboard.set_focus(self, Some(window.wl_surface().clone()), Serial::from(0));
+        }
+        let now_focused = self.windows.focused_window().map(|window| window.id());
+        if was_focused != now_focused {
+            self.needs_redraw = true;
         }
     }
 
@@ -436,6 +548,7 @@ impl App {
                 let new_h = (resize.start_size.1 + dy as i32).max(MIN_FLOAT_HEIGHT);
                 if window.set_size(Size::from((new_w, new_h))) {
                     window.configure();
+                    self.needs_redraw = true;
                 }
             }
             return;
@@ -445,6 +558,7 @@ impl App {
             if let Some(window) = self.windows.window_mut(drag.window_id) {
                 let new_location = (x - drag.offset.0, y - drag.offset.1);
                 window.set_location((new_location.0 as i32, new_location.1 as i32).into());
+                self.needs_redraw = true;
             }
             return;
         }
@@ -468,10 +582,8 @@ impl App {
             return;
         }
 
-        if button != Some(MouseButton::Left) {
-            if button != Some(MouseButton::Right) {
-                return;
-            }
+        if button != Some(MouseButton::Left) && button != Some(MouseButton::Right) {
+            return;
         }
 
         let mods = self.input.modifiers();
@@ -491,12 +603,14 @@ impl App {
                 }
                 if button == Some(MouseButton::Left) {
                     window.set_dragging(true);
-                    let offset = (x - window.location().x as f64, y - window.location().y as f64);
+                    let offset = (
+                        x - window.location().x as f64,
+                        y - window.location().y as f64,
+                    );
                     self.input.begin_drag(window_id, offset);
                 } else if button == Some(MouseButton::Right) {
                     let size = window.size();
-                    self.input
-                        .begin_resize(window_id, (x, y), (size.w, size.h));
+                    self.input.begin_resize(window_id, (x, y), (size.w, size.h));
                 }
             }
         }
@@ -525,7 +639,10 @@ impl App {
 
     fn set_maximized(&mut self, window_id: WindowId, maximized: bool) -> bool {
         let output_size = self.output_size;
-        if !self.windows.set_maximized(window_id, maximized, output_size) {
+        if !self
+            .windows
+            .set_maximized(window_id, maximized, output_size)
+        {
             return false;
         }
         if let Some(window) = self.windows.window_mut(window_id) {
@@ -539,6 +656,7 @@ impl App {
             });
             window.toplevel().send_configure();
         }
+        self.needs_redraw = true;
         true
     }
 
@@ -596,7 +714,13 @@ impl XdgShellHandler for App {
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
 
-    fn reposition_request(&mut self, _surface: PopupSurface, _positioner: PositionerState, _token: u32) {}
+    fn reposition_request(
+        &mut self,
+        _surface: PopupSurface,
+        _positioner: PositionerState,
+        _token: u32,
+    ) {
+    }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         self.apply_floating_rule(&surface);
@@ -667,6 +791,9 @@ impl CompositorHandler for App {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        if self.windows.window_id_for_surface(surface).is_some() {
+            self.needs_redraw = true;
+        }
     }
 }
 
@@ -687,7 +814,12 @@ impl SeatHandler for App {
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: smithay::input::pointer::CursorImageStatus) {}
+    fn cursor_image(
+        &mut self,
+        _seat: &Seat<Self>,
+        _image: smithay::input::pointer::CursorImageStatus,
+    ) {
+    }
 }
 
 delegate_xdg_shell!(App);

@@ -5,8 +5,8 @@ use crate::compositor::window::WindowId;
 
 const NO_SYMBOL: Keysym = Keysym::new(keysyms::KEY_NoSymbol);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Action {
     Quit,
     NextLayout,
@@ -22,6 +22,14 @@ pub enum Action {
     WorkspacePrev,
     MoveToWorkspaceNext,
     MoveToWorkspacePrev,
+    #[serde(rename_all = "camelCase")]
+    Spawn {
+        command: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Launcher {
+        query: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -124,7 +132,12 @@ impl InputState {
         self.resize_state
     }
 
-    pub fn begin_resize(&mut self, window_id: WindowId, start_pointer: (f64, f64), start_size: (i32, i32)) {
+    pub fn begin_resize(
+        &mut self,
+        window_id: WindowId,
+        start_pointer: (f64, f64),
+        start_size: (i32, i32),
+    ) {
         self.resize_state = Some(ResizeState {
             window_id,
             start_pointer,
@@ -139,12 +152,16 @@ impl InputState {
     pub fn action_for(&self, mods: &ModifiersState, keysym: Keysym) -> Option<Action> {
         self.keybindings
             .iter()
-            .find(|binding| binding.keysym == keysym && binding.modifiers.matches(mods, self.super_is_alt))
-            .map(|binding| binding.action)
+            .find(|binding| {
+                binding.keysym == keysym && binding.modifiers.matches(mods, self.super_is_alt)
+            })
+            .map(|binding| binding.action.clone())
     }
 }
 
-pub fn resolve_keybindings(bindings: &[crate::compositor::config::KeybindingConfig]) -> Vec<ResolvedKeybinding> {
+pub fn resolve_keybindings(
+    bindings: &[crate::compositor::config::KeybindingConfig],
+) -> Vec<ResolvedKeybinding> {
     bindings
         .iter()
         .filter_map(|binding| {
@@ -152,7 +169,7 @@ pub fn resolve_keybindings(bindings: &[crate::compositor::config::KeybindingConf
             let keysym = normalize_keysym(keysym);
             let modifiers = parse_modifiers(&binding.modifiers);
             Some(ResolvedKeybinding {
-                action: binding.action,
+                action: binding.action.clone(),
                 keysym,
                 modifiers,
             })

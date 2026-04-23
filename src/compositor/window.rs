@@ -10,6 +10,7 @@ use smithay::{
 };
 
 pub const DECORATION_HEIGHT: i32 = 28;
+pub const PANEL_HEIGHT: i32 = 28;
 const DECORATION_FOCUSED: Color32F = Color32F::new(0.28, 0.32, 0.4, 1.0);
 const DECORATION_UNFOCUSED: Color32F = Color32F::new(0.18, 0.2, 0.26, 1.0);
 
@@ -23,6 +24,8 @@ pub struct Window {
     size: Size<i32, Logical>,
     decoration_id: Id,
     decoration_commit: CommitCounter,
+    decoration_focused: Color32F,
+    decoration_unfocused: Color32F,
     dragging: bool,
     floating: bool,
     forced_floating: bool,
@@ -43,6 +46,8 @@ impl Window {
             size: (800, 600).into(),
             decoration_id: Id::new(),
             decoration_commit: CommitCounter::default(),
+            decoration_focused: DECORATION_FOCUSED,
+            decoration_unfocused: DECORATION_UNFOCUSED,
             dragging: false,
             floating: false,
             forced_floating: false,
@@ -59,7 +64,9 @@ impl Window {
         self.id
     }
 
-    pub fn wl_surface(&self) -> &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface {
+    pub fn wl_surface(
+        &self,
+    ) -> &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface {
         self.toplevel.wl_surface()
     }
 
@@ -190,7 +197,11 @@ impl Window {
         self.decoration_commit.increment();
     }
 
-    pub fn set_geometry(&mut self, location: Point<i32, Logical>, size: Size<i32, Logical>) -> bool {
+    pub fn set_geometry(
+        &mut self,
+        location: Point<i32, Logical>,
+        size: Size<i32, Logical>,
+    ) -> bool {
         let changed = self.location != location || self.size != size;
         if changed {
             self.location = location;
@@ -233,9 +244,9 @@ impl Window {
 
     pub fn decoration_element(&self, scale: Scale<f64>, focused: bool) -> SolidColorRenderElement {
         let color = if focused {
-            DECORATION_FOCUSED
+            self.decoration_focused
         } else {
-            DECORATION_UNFOCUSED
+            self.decoration_unfocused
         };
         let color = Color32F::new(
             color.r(),
@@ -246,7 +257,18 @@ impl Window {
 
         let size = Size::from((self.size.w, DECORATION_HEIGHT.max(1)));
         let rect = Rectangle::new(self.location, size).to_physical_precise_round(scale);
-        SolidColorRenderElement::new(self.decoration_id.clone(), rect, self.decoration_commit, color, Kind::Unspecified)
+        SolidColorRenderElement::new(
+            self.decoration_id.clone(),
+            rect,
+            self.decoration_commit,
+            color,
+            Kind::Unspecified,
+        )
+    }
+
+    pub fn set_decoration_colors(&mut self, focused: Color32F, unfocused: Color32F) {
+        self.decoration_focused = focused;
+        self.decoration_unfocused = unfocused;
     }
 }
 
@@ -269,6 +291,32 @@ impl WindowManager {
         }
     }
 
+    pub fn set_decoration_colors(&mut self, focused: Color32F, unfocused: Color32F) {
+        for window in &mut self.windows {
+            window.set_decoration_colors(focused, unfocused);
+        }
+    }
+
+    pub fn set_workspace_count(&mut self, count: usize) {
+        if count > 0 && count != self.workspace_count {
+            let old_count = self.workspace_count;
+            self.workspace_count = count;
+            if self.current_workspace >= count {
+                self.current_workspace = count.saturating_sub(1);
+            }
+            self.windows.retain(|w| w.workspace() < count);
+            if self.focused.is_some() {
+                if let Some(focused) = self.focused {
+                    let still_valid = self.windows.iter().any(|w| w.id() == focused);
+                    if !still_valid {
+                        self.focused = None;
+                    }
+                }
+            }
+            tracing::info!("Workspace count changed from {} to {}", old_count, count);
+        }
+    }
+
     pub fn windows(&self) -> &[Window] {
         &self.windows
     }
@@ -287,11 +335,9 @@ impl WindowManager {
     }
 
     pub fn focus_window(&mut self, id: WindowId) -> bool {
-        if !self
-            .windows
-            .iter()
-            .any(|window| window.id == id && !window.is_minimized() && window.workspace == self.current_workspace)
-        {
+        if !self.windows.iter().any(|window| {
+            window.id == id && !window.is_minimized() && window.workspace == self.current_workspace
+        }) {
             return false;
         }
 
@@ -316,7 +362,10 @@ impl WindowManager {
         let next = match self.focused {
             None => ids.last().copied(),
             Some(id) => {
-                let idx = ids.iter().position(|window_id| *window_id == id).unwrap_or(0);
+                let idx = ids
+                    .iter()
+                    .position(|window_id| *window_id == id)
+                    .unwrap_or(0);
                 let next_idx = (idx + 1) % ids.len();
                 Some(ids[next_idx])
             }
@@ -340,7 +389,10 @@ impl WindowManager {
         let prev = match self.focused {
             None => ids.last().copied(),
             Some(id) => {
-                let idx = ids.iter().position(|window_id| *window_id == id).unwrap_or(0);
+                let idx = ids
+                    .iter()
+                    .position(|window_id| *window_id == id)
+                    .unwrap_or(0);
                 let prev_idx = if idx == 0 { ids.len() - 1 } else { idx - 1 };
                 Some(ids[prev_idx])
             }
@@ -352,12 +404,11 @@ impl WindowManager {
     }
 
     pub fn focused_window(&self) -> Option<&Window> {
-        self.focused
-            .and_then(|id| {
-                self.windows
-                    .iter()
-                    .find(|window| window.id == id && window.workspace == self.current_workspace)
-            })
+        self.focused.and_then(|id| {
+            self.windows
+                .iter()
+                .find(|window| window.id == id && window.workspace == self.current_workspace)
+        })
     }
 
     pub fn focused_window_mut(&mut self) -> Option<&mut Window> {
@@ -421,7 +472,12 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
-    pub fn set_maximized(&mut self, id: WindowId, maximized: bool, output_size: Size<i32, Logical>) -> bool {
+    pub fn set_maximized(
+        &mut self,
+        id: WindowId,
+        maximized: bool,
+        output_size: Size<i32, Logical>,
+    ) -> bool {
         self.window_mut(id)
             .map(|window| window.set_maximized(maximized, output_size))
             .unwrap_or(false)

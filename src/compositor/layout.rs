@@ -1,6 +1,6 @@
 use smithay::utils::{Logical, Rectangle, Size};
 
-use crate::compositor::window::{Window, DECORATION_HEIGHT};
+use crate::compositor::window::{Window, DECORATION_HEIGHT, PANEL_HEIGHT};
 
 #[derive(Debug, Clone, Copy)]
 pub enum LayoutMode {
@@ -30,16 +30,10 @@ impl LayoutMode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Gaps {
     pub inner: i32,
     pub outer: i32,
-}
-
-impl Default for Gaps {
-    fn default() -> Self {
-        Self { inner: 0, outer: 0 }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -50,6 +44,8 @@ pub struct LayoutEngine {
 
 impl LayoutEngine {
     pub fn apply(&self, output: Size<i32, Logical>, windows: &mut [Window], workspace: usize) {
+        let output = Size::from((output.w, (output.h - PANEL_HEIGHT).max(1)));
+
         let active: Vec<usize> = windows
             .iter()
             .enumerate()
@@ -67,7 +63,9 @@ impl LayoutEngine {
         }
 
         let rects = match self.mode {
-            LayoutMode::MasterStack { ratio } => master_stack_rects(active.len(), output, self.gaps, ratio),
+            LayoutMode::MasterStack { ratio } => {
+                master_stack_rects(active.len(), output, self.gaps, ratio)
+            }
             LayoutMode::Grid => grid_rects(active.len(), output, self.gaps),
         };
 
@@ -75,7 +73,8 @@ impl LayoutEngine {
             let idx = active[slot];
             let client_height = (rect.size.h - DECORATION_HEIGHT).max(1);
             let client_size = Size::from((rect.size.w.max(1), client_height));
-            if windows[idx].set_geometry(rect.loc, client_size) {
+            let location = (rect.loc.x, rect.loc.y + PANEL_HEIGHT);
+            if windows[idx].set_geometry(location.into(), client_size) {
                 windows[idx].configure();
             }
         }
@@ -98,7 +97,8 @@ fn master_stack_rects(
 
     let master = Rectangle::new(area.loc, Size::from((master_width, area.size.h)));
     let stack_origin = (area.loc.x + master_width + gaps.inner, area.loc.y).into();
-    let stack: Rectangle<i32, Logical> = Rectangle::new(stack_origin, Size::from((stack_width, area.size.h)));
+    let stack: Rectangle<i32, Logical> =
+        Rectangle::new(stack_origin, Size::from((stack_width, area.size.h)));
 
     let mut rects = Vec::with_capacity(count);
     rects.push(master);
@@ -109,13 +109,20 @@ fn master_stack_rects(
 
     for i in 0..stack_count {
         let y = stack.loc.y + i as i32 * (stack_height + gaps.inner);
-        rects.push(Rectangle::new((stack.loc.x, y).into(), Size::from((stack.size.w, stack_height))));
+        rects.push(Rectangle::new(
+            (stack.loc.x, y).into(),
+            Size::from((stack.size.w, stack_height)),
+        ));
     }
 
     rects
 }
 
-fn grid_rects(count: usize, output: Size<i32, Logical>, gaps: Gaps) -> Vec<Rectangle<i32, Logical>> {
+fn grid_rects(
+    count: usize,
+    output: Size<i32, Logical>,
+    gaps: Gaps,
+) -> Vec<Rectangle<i32, Logical>> {
     let area = apply_outer_gaps(output, gaps.outer);
     let columns = (count as f32).sqrt().ceil() as i32;
     let rows = ((count as f32) / columns as f32).ceil() as i32;
@@ -138,10 +145,7 @@ fn grid_rects(count: usize, output: Size<i32, Logical>, gaps: Gaps) -> Vec<Recta
 }
 
 fn apply_outer_gaps(output: Size<i32, Logical>, outer: i32) -> Rectangle<i32, Logical> {
-    let size = Size::from((
-        (output.w - outer * 2).max(1),
-        (output.h - outer * 2).max(1),
-    ));
+    let size = Size::from(((output.w - outer * 2).max(1), (output.h - outer * 2).max(1)));
     Rectangle::new((outer, outer).into(), size)
 }
 
